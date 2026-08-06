@@ -490,6 +490,7 @@
     let state = { items:{}, employees:{}, issues:{}, goods:{}, shops:{}, goods_prices:{} };
     let tsInstances = {}; // TomSelect instances
     let currentView = 'dashboard';
+    window.currentHistoryEmpId = null;
     document.getElementById('quote-today').innerText = new Date().toLocaleDateString();
 
     function showToast(msg, isError = false) {
@@ -508,6 +509,8 @@
       let hash = window.location.hash.substring(1) || 'dashboard';
       if (!views.includes(hash)) hash = 'dashboard';
       currentView = hash;
+      if(hash !== 'history') window.currentHistoryEmpId = null;
+      if(hash === 'history' && !window.currentHistoryEmpId) renderAllHistory();
       document.querySelectorAll('.view-section').forEach(el => el.classList.remove('active'));
       document.getElementById(`view-${hash}`).classList.add('active');
       document.getElementById('header-title').textContent = titles[hash];
@@ -528,7 +531,14 @@
       const data = snap.val() || {};
       ['items','employees','issues','goods','shops','goods_prices'].forEach(k => state[k] = data[k] || {});
       updateSelects(); renderAll(); renderDashboard();
-      if(currentView === 'history') { renderHistorySearch(); renderAllHistory(); }
+      if(currentView === 'history') { 
+         renderHistorySearch(); 
+         if(window.currentHistoryEmpId) {
+             viewEmpHistory(window.currentHistoryEmpId);
+         } else {
+             renderAllHistory(); 
+         }
+      }
       if(currentView === 'compare') renderCompare();
       updateIssueEmpDropdown();
     });
@@ -873,7 +883,7 @@
       let monthlyIssues = [];
       
       Object.values(state.issues).forEach(iss => {
-        iss.items.forEach(item => {
+        iss.items.forEach((item, itemIdx) => {
            let cat = issued[item.cat] !== undefined ? item.cat : 'Custom';
            issued[cat] += Number(item.qty);
            
@@ -1034,7 +1044,29 @@
        document.getElementById('history-emp-suggestions').innerHTML = html;
     };
     
+    window.deleteIssueItem = (issueId, itemIdx) => {
+       if(!confirm("Are you sure you want to delete this issued item and return it to stock?")) return;
+       let issue = state.issues[issueId];
+       if(!issue) return;
+       let item = issue.items[itemIdx];
+       let targetKey = Object.keys(state.items).find(k => state.items[k].category === item.cat && (state.items[k].size === item.size || item.size === 'N/A'));
+       if(targetKey) {
+           db.ref(`items/${targetKey}`).update({quantity: state.items[targetKey].quantity + item.qty});
+       } else {
+           db.ref('items').push({category: item.cat, size: item.size || 'N/A', quantity: item.qty, type: 'Custom', threshold: 5});
+       }
+       issue.items.splice(itemIdx, 1);
+       if(issue.items.length === 0) {
+           db.ref(`issues/${issueId}`).remove();
+       } else {
+           db.ref(`issues/${issueId}/items`).set(issue.items);
+       }
+       showToast("Item permanently deleted.");
+       
+    };
+
     window.viewEmpHistory = (empId) => {
+       window.currentHistoryEmpId = empId;
        const emp = state.employees[empId];
        if(!emp) return;
        
@@ -1045,7 +1077,7 @@
          </div>
        `;
        
-       let empIssues = Object.values(state.issues).filter(iss => iss.empId === empId).sort((a,b)=>new Date(b.date)-new Date(a.date));
+       let empIssues = Object.entries(state.issues).map(([id, iss]) => ({...iss, id})).filter(iss => iss.empId === empId).sort((a,b)=>new Date(b.date)-new Date(a.date));
        
        if(empIssues.length === 0) {
           histHTML += `<p class="text-slate-500 italic">No issuance history found for this employee.</p>`;
@@ -1054,10 +1086,10 @@
           let issueRows = '';
           
           empIssues.forEach(iss => {
-             iss.items.forEach(item => {
+             iss.items.forEach((item, itemIdx) => {
                 let key = `${item.cat} (${item.size||'N/A'})`;
                 itemTotals[key] = (itemTotals[key]||0) + item.qty;
-                issueRows += `<tr class="border-b hover:bg-slate-50"><td class="p-3">${iss.date}</td><td class="p-3 font-medium text-slate-800">${item.cat}</td><td class="p-3">${item.size||'-'}</td><td class="p-3 text-right font-bold">${item.qty}</td></tr>`;
+                issueRows += `<tr class="border-b hover:bg-slate-50"><td class="p-3">${iss.date}</td><td class="p-3 font-medium text-slate-800">${item.cat}</td><td class="p-3">${item.size||"-"} </td><td class="p-3 text-right font-bold">${item.qty}</td><td class="p-3 text-right"><button onclick="deleteIssueItem('${iss.id}', ${itemIdx})" class="text-red-500 hover:text-red-700 bg-red-50 hover:bg-red-100 p-1.5 rounded transition" title="Delete record"><i data-lucide="trash-2" class="w-4 h-4"></i></button></td></tr>`;
              });
           });
           
@@ -1067,41 +1099,60 @@
             </div>
             <div class="border rounded-xl overflow-hidden">
                <table class="w-full text-left">
-                 <thead class="bg-slate-50 text-slate-600 border-b"><tr><th class="p-3">Date</th><th class="p-3">Item</th><th class="p-3">Size</th><th class="p-3 text-right">Qty</th></tr></thead>
+                 <thead class="bg-slate-50 text-slate-600 border-b"><tr><th class="p-3">Date</th><th class="p-3">Item</th><th class="p-3">Size</th><th class="p-3 text-right">Qty</th><th class="p-3 text-right">Actions</th></tr></thead>
                  <tbody>${issueRows}</tbody>
                </table>
             </div>
           `;
        }
        document.getElementById('history-content').innerHTML = histHTML;
+       lucide.createIcons();
     };
     
     window.renderAllHistory = () => {
-       let html = '';
-       Object.entries(state.employees).forEach(([k, emp]) => {
-          let empIssues = Object.values(state.issues).filter(iss => iss.empId === k);
-          if(empIssues.length > 0) {
-             let itemTotals = {};
-             empIssues.forEach(iss => iss.items.forEach(item => {
-                 let key = `${item.cat}`;
-                 itemTotals[key] = (itemTotals[key]||0) + item.qty;
-             }));
-             
-             html += `
-               <div class="border rounded-xl p-5 mb-4 shadow-sm bg-white">
-                 <h3 class="font-bold text-lg text-slate-800 mb-2">${emp.name} <span class="text-sm text-slate-500 font-normal">(${emp.empNo})</span></h3>
-                 <div class="flex gap-3 flex-wrap">
-                   ${Object.entries(itemTotals).map(([cat,qty]) => `<div class="text-sm bg-indigo-50 text-indigo-700 px-2 py-1 rounded border border-indigo-100 font-medium">${cat}: ${qty}</div>`).join('')}
-                 </div>
-                 <div class="mt-4 pt-4 border-t text-sm">
-                   <button onclick="viewEmpHistory('${k}')" class="text-indigo-600 hover:underline font-medium">View Detailed Log &rarr;</button>
-                 </div>
-               </div>
-             `;
-          }
+       window.currentHistoryEmpId = null; // Reset single employee view
+       let allIssues = Object.entries(state.issues)
+           .map(([id, iss]) => ({...iss, id}))
+           .sort((a,b)=>new Date(b.date)-new Date(a.date));
+           
+       if(allIssues.length === 0) {
+           document.getElementById('history-content').innerHTML = '<div class="text-center text-slate-400 py-10">No items have been issued yet.</div>';
+           return;
+       }
+       
+       let issueRows = '';
+       allIssues.forEach(iss => {
+           let emp = state.employees[iss.empId];
+           let empName = emp ? emp.name : 'Unknown';
+           let empNo = emp ? emp.empNo : '-';
+           
+           iss.items.forEach((item, itemIdx) => {
+               issueRows += `<tr class="border-b hover:bg-slate-50">
+                   <td class="p-3 whitespace-nowrap">${iss.date}</td>
+                   <td class="p-3 font-medium text-indigo-700 cursor-pointer hover:underline" onclick="viewEmpHistory('${iss.empId}')">${empName} <span class="text-xs text-slate-500">(${empNo})</span></td>
+                   <td class="p-3 font-medium text-slate-800">${item.cat}</td>
+                   <td class="p-3">${item.size||'-'}</td>
+                   <td class="p-3 text-right font-bold">${item.qty}</td>
+                   <td class="p-3 text-right">
+                       <button onclick="deleteIssueItem('${iss.id}', ${itemIdx})" class="text-red-500 hover:text-red-700 bg-red-50 hover:bg-red-100 p-1.5 rounded transition" title="Delete record"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                   </td>
+               </tr>`;
+           });
        });
-       if(!html) html = '<div class="text-center text-slate-400 py-10">No items have been issued to any employee yet.</div>';
-       document.getElementById('history-content').innerHTML = `<h3 class="font-bold mb-4 text-slate-500 uppercase tracking-wide">All Issued Records</h3>` + html;
+       
+       let histHTML = `
+           <h3 class="font-bold mb-4 text-slate-500 uppercase tracking-wide">All Issued Records</h3>
+           <div class="border rounded-xl overflow-hidden bg-white shadow-sm">
+               <div class="overflow-x-auto">
+                   <table class="w-full text-left">
+                     <thead class="bg-slate-50 text-slate-600 border-b"><tr><th class="p-3">Date</th><th class="p-3">Employee</th><th class="p-3">Item</th><th class="p-3">Size</th><th class="p-3 text-right">Qty</th><th class="p-3 text-right">Actions</th></tr></thead>
+                     <tbody>${issueRows}</tbody>
+                   </table>
+               </div>
+           </div>
+       `;
+       document.getElementById('history-content').innerHTML = histHTML;
+       lucide.createIcons();
     };
     
     // 4. Excel Upload for Employees
